@@ -1,4 +1,4 @@
-import base64, io, os, uuid
+import base64, io, os, re, uuid
 import streamlit as st
 from groq import Groq
 from openai import OpenAI
@@ -65,6 +65,12 @@ def save_chat(cid):
 
 def login_screen():
     st.markdown(ORB % "Satyam AI me aao", unsafe_allow_html=True)
+    if not (SB_URL and SB_KEY):
+        st.warning("Login chalu karne ke liye Secrets me SUPABASE_URL aur SUPABASE_KEY daalo (README dekho). Tab tak Guest chalao.")
+        if st.button("Guest ki tarah chalao", use_container_width=True):
+            S.guest = True
+            st.rerun()
+        st.stop()
     tabs = st.tabs(["Login", "Sign up"])
     for tab, mode in zip(tabs, ("in", "up")):
         with tab:
@@ -90,7 +96,7 @@ def login_screen():
         st.rerun()
     st.stop()
 
-if SB_URL and SB_KEY and not S.user and not S.guest:
+if not S.user and not S.guest:
     login_screen()
 
 # ---------- Chats ----------
@@ -118,7 +124,9 @@ with st.sidebar:
             S.update(user=None, sb=None, chats={}, cur=None, guest=False)
             st.rerun()
 
-model = MODELS[st.selectbox("AI Engine", list(MODELS), label_visibility="collapsed")]
+S.speak = st.sidebar.toggle("🔊 जवाब बोलकर सुनाओ", value=S.get("speak", True))
+choice = st.selectbox("AI Engine", list(MODELS), label_visibility="collapsed")
+model = MODELS[choice]
 
 if not chat["msgs"]:
     st.markdown(ORB % "नमस्ते! मैं Satyam हूँ", unsafe_allow_html=True)
@@ -143,15 +151,10 @@ def client_for(p):
         return Groq(api_key=key(k))
     return OpenAI(api_key=key(k), base_url="https://api.x.ai/v1" if p == "xai" else None)
 
-def reply(msgs, img_bytes):
-    p, name, env, vision = model
-    if img_bytes and not vision:  # is model ko photo nahi dikhti -> Gemini
-        p, name, env = "gemini", "gemini-flash-latest", "GEMINI_MODEL"
-    name = key(env) or name
-    msgs = msgs[-20:]
+def call(p, name, msgs, img_bytes):
     if p == "gemini":
         if not GEM_KEY:
-            raise RuntimeError("GEMINI_API_KEY Secrets me daalo")
+            raise RuntimeError("GEMINI_API_KEY Secrets me nahi hai")
         g = genai.GenerativeModel(name, system_instruction=SYSTEM)
         hist = [{"role": "model" if m["role"] == "assistant" else "user", "parts": [full(m)]} for m in msgs]
         if img_bytes:
@@ -165,19 +168,51 @@ def reply(msgs, img_bytes):
     r = client_for(p).chat.completions.create(model=name, messages=api)
     return r.choices[0].message.content
 
-IMG = ("png", "jpg", "jpeg")
-with st.popover("➕ फाइल / 🎤 आवाज़"):
-    up = st.file_uploader("फोटो या फाइल भेजो", type=list(IMG) + ["txt", "md", "py", "csv", "json"], key=f"f{S.up}")
-    voice = st.audio_input("🎤 बोलो")
-prompt = st.chat_input("मुझसे कभी भी पूछें...")
+def reply(msgs, img_bytes):
+    msgs = msgs[-20:]
+    p, name, env, vision = model
+    if img_bytes and not vision:  # is model ko photo nahi dikhti -> Gemini
+        p, name, env = MODELS["Gemini"][:3]
+    tries = [(p, key(env) or name)]
+    for fp, fn, fe, fv in (MODELS["Gemini"], MODELS["Satyam AI"]):  # backup models
+        t = (fp, key(fe) or fn)
+        if t not in tries and (fv or not img_bytes):
+            tries.append(t)
+    note, last = "", None
+    for i, (tp, tn) in enumerate(tries):
+        try:
+            out = call(tp, tn, msgs, img_bytes)
+            return note + out
+        except Exception as e:
+            last = e
+            if i == 0:
+                note = f"ℹ️ {choice} chal nahi paaya ({str(e)[:90]}), isliye dusre model ne jawab diya.\n\n"
+    raise last
 
-if voice and S.get("last_voice") != voice.file_id:
-    S.last_voice = voice.file_id
+def speak(text):
     try:
-        prompt = client_for("groq").audio.transcriptions.create(
-            file=("voice.wav", voice.getvalue()), model="whisper-large-v3-turbo", language="hi").text
-    except Exception as e:
-        st.error(f"आवाज़ समझ नहीं आई: {e}")
+        from gtts import gTTS
+        buf = io.BytesIO()
+        gTTS(re.sub(r"[*_`#>|]", "", text)[:1200], lang="hi").write_to_fp(buf)
+        st.audio(buf.getvalue(), format="audio/mp3", autoplay=True)
+    except Exception:
+        pass
+
+IMG = ("png", "jpg", "jpeg")
+val = st.chat_input("मुझसे कभी भी पूछें...", accept_file=True, accept_audio=True,
+                    file_type=list(IMG) + ["txt", "md", "py", "csv", "json"])
+prompt, up = None, None
+if val:
+    prompt = (val.text or "").strip()
+    up = val.files[0] if val.files else None
+    if val.audio:
+        try:
+            prompt = client_for("groq").audio.transcriptions.create(
+                file=("voice.wav", val.audio.getvalue()), model="whisper-large-v3-turbo", language="hi").text
+        except Exception as e:
+            st.error(f"आवाज़ समझ नहीं आई: {e}")
+    if up and not prompt:
+        prompt = "इस फाइल को देखो और बताओ"
 prompt = prompt or S.quick
 S.quick = None
 
@@ -205,5 +240,5 @@ if prompt:
         st.markdown(ans)
     chat["msgs"].append({"role": "assistant", "content": ans})
     save_chat(S.cur)
-    S.up += 1
-    st.rerun()
+    if S.speak:
+        speak(ans)
