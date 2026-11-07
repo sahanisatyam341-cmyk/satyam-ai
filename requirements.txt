@@ -1,6 +1,7 @@
-streamlit>=1.40
+streamlit>=1.50
 groq
 openai
 google-generativeai
 supabase
 pillow
+gTTS
