@@ -2,4 +2,5 @@ streamlit>=1.40
 groq
 openai
 google-generativeai
+supabase
 pillow
